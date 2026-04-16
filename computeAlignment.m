@@ -1,0 +1,102 @@
+function [tformresized,warpfieldresized,targetsize,Rfixed_global] = computeAlignment2(smallresfixed_IH,smallresmoving_IF,alignres,visualize)
+%computes the actual alignment between images as given, then upsamples it to ouptput size
+%smallresfixed_IH -fixed image already downsampled to resolution for computing alignment
+%smallresmoving_IF -moving ditto (not actually IF if AEC to AEC pass)
+%targetsize size of final output image (which alignment is upsampled to
+%alignres-resolution of alignment relative to original used in upsampling alignment
+%alignmode true uses imregcorr for linear alignment, false uses imregtform
+%visualize- visualize results for debugging
+
+%mod
+targetsize=size(smallresfixed_IH);
+Rfixed_global = imref2d(size(smallresfixed_IH));
+
+smallresfixed_IH=single(imresize(smallresfixed_IH,alignres));
+smallresmoving_IF=single(imresize(smallresmoving_IF,alignres));
+
+
+
+
+
+%bacground correction on both before computing alignmeht
+bk=imerode(medfilt2(smallresfixed_IH),offsetstrel('ball',5,5));
+smallresfixed_IH=max(smallresfixed_IH-bk,0);
+bk=imerode(medfilt2(smallresmoving_IF),offsetstrel('ball',5,5));
+%right now this is strictly not ncessary bc is a uint but might change
+%sometime and keeping treatment uniform.
+smallresmoving_IF=max(smallresmoving_IF-bk,0);
+
+%normalize first hope this helps with unstable linear alignment 
+smallresmoving_IF=min(1,single(smallresmoving_IF)./single(prctile(max(smallresmoving_IF),70)));
+smallresfixed_IH=min(1,smallresfixed_IH./prctile(max(smallresfixed_IH),70));
+
+%currently not using linear at lower scale option but it is still
+%functional
+scalebtwlinnon=1;
+%align linear at half scale of 
+smallresfixed_IHlin=imresize(smallresfixed_IH,1/scalebtwlinnon);
+smallresmoving_IFlin=imresize(smallresmoving_IF,1/scalebtwlinnon);
+
+% I have never been able to figure out why periodically one or the other of
+% these built in methods fail, just do both all the time and pick the one
+% with lower SSE
+%second step linear alignment
+%one of two methods based on alignmode flag
+%if (alignmode)
+    %would this be better limited to rigid or translation, which should be
+    %sufficentl
+    tform1=imregcorr(smallresmoving_IFlin,smallresfixed_IHlin,'similarity');
+%else
+    [optimizer,metric]=imregconfig('multimodal');
+    tform2=imregtform(smallresmoving_IFlin,smallresfixed_IHlin,'similarity',optimizer,metric); %was affine similarity is better but still off
+%end
+%make temporary transformed images at alignment scale to test error
+Rfixed = imref2d(size(smallresfixed_IHlin));
+%moving with linear applied for nonlinear
+transformedtform1 = imwarp(smallresmoving_IFlin,tform1,'OutputView',Rfixed);
+transformedtform2 = imwarp(smallresmoving_IFlin,tform2,'OutputView',Rfixed);
+error1=sum(sum((transformedtform1-smallresfixed_IHlin).^2));
+error2=sum(sum((transformedtform2-smallresfixed_IHlin).^2));
+if(error1<error2)
+    tform=tform1;
+else
+    tform=tform2;
+end
+
+%doing linear at potentially different scale from nonlinear
+tform.T(3,1:2)=tform.T(3,1:2)*scalebtwlinnon;
+
+Rfixed = imref2d(size(smallresfixed_IH));
+%moving with linear applied for nonlinear
+ifcmovingrlin = imwarp(smallresmoving_IF,tform,'OutputView',Rfixed);
+
+if (visualize)
+    figure; imshowpair(smallresfixed_IH,ifcmovingrlin*10);title('linear alingment');
+end
+
+%{
+%normalize bf nonlinear, not sure this actually helps.
+ifcmovingrlin_n=min(1,single(ifcmovingrlin)./single(prctile(max(ifcmovingrlin),70)));
+smallresfixed_IH_n=min(1,smallresfixed_IH./prctile(max(smallresfixed_IH),70));
+%}
+%third step nonlinear alignment
+
+[warpfield,smallregisteredifc]=imregdemons(ifcmovingrlin,smallresfixed_IH,[500 500 100 10  ],'PyramidLevels',4,'AccumulatedFieldSmoothing',1.3,'DisplayWaitbar',false);
+
+if (visualize)
+    figure;imshowpair(smallresfixed_IH,min(1,smallregisteredifc));title('1 to 16 nonlinear alignment 4level norm_v2');
+    figure;
+    visimage=cat(3,smallresfixed_IH,smallregisteredifc,abs(max(warpfield,[],3)*2));
+    imagesc(visimage);
+    title('aligned images and warpfield');
+end
+
+
+%at this point have the small transform and need to upscale to apply to
+%full size image
+tformresized=tform;
+%rescaling of tform
+tformresized.T(3,1:2)=tformresized.T(3,1:2)*(1/alignres);
+warpfieldresized=(imresize(single(warpfield),[targetsize(1),targetsize(2)]).*(1/alignres));
+
+end
